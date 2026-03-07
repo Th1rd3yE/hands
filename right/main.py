@@ -78,20 +78,11 @@ async def verify_claim(request: BrainRequest):
 
         data = json.loads(raw_text)
 
-        # 3. Logic Gate (Using truth_score)
-        score = data.get("truth_score", 0.0)
-        
-        if score >= 0.7:
-            data["classification"] = "TRUE"
-            # data["is_true"] = True
-        elif 0.4 <= score <= 0.6:
-            data["classification"] = "UNCERTAIN"
-            # data["is_true"] = False
-        else:
-            data["classification"] = "FALSE"
-            # data["is_true"] = False
+        # # Background Logging
+        # with open("research_history.jsonl", "a", encoding="utf-8") as f:
+        #     log_entry = {"time": datetime.now().isoformat(), "query": request.context, "res": data}
+        #     f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
-        data["sources"] = actual_urls
         return data
 
     except Exception as e:
