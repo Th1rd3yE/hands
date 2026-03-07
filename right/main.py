@@ -29,21 +29,24 @@ class BrainRequest(BaseModel):
 @app.post("/verify")
 async def verify_claim(request: BrainRequest):
     try:
-        # Optimized prompt to get raw data for the threshold logic
+        # Prompt optimized for research and raw data
         prompt = f"""
         TASK: Research and verify the following claim:
-        Claim: {request.context}
+        Claim: "{request.context}"
         Location: {request.country}
         Date: {request.date}
 
-        OUTPUT FORMAT: Respond ONLY with a raw JSON object. Do not include markdown tags.
-        
+        INSTRUCTIONS:
+        1. PREMISE CHECK: Ensure the entity (e.g. mall/place) actually exists in {request.country}.
+        2. SEARCH: Use Google Search to find real-time news for {request.date}.
+        3. OUTPUT: Respond ONLY with a raw JSON object. Do not use markdown tags.
+
         SCHEMA:
         {{
           "raw_confidence": 0.0-1.0,
-          "explanation_en": "Summary of findings in English",
-          "explanation_native": "Summary of findings in {request.native_language}",
-          "sources": ["url1", "url2"]
+          "explanation_en": "Start with location confirmation, then the fact check.",
+          "explanation_native": "Same as above in {request.native_language}",
+          "sources": [] 
         }}
         """
 
@@ -55,8 +58,18 @@ async def verify_claim(request: BrainRequest):
                 temperature=0.0
             )
         )
-        
-        # Cleanup: Remove any accidental markdown backticks
+
+        # --- 1. EXTRACT ACTUAL URLS FROM METADATA ---
+        actual_urls = []
+        try:
+            metadata = response.candidates[0].grounding_metadata
+            if metadata and metadata.grounding_chunks:
+                # This grabs the actual web links, not the citation numbers
+                actual_urls = list(set([chunk.web.uri for chunk in metadata.grounding_chunks if chunk.web]))
+        except Exception:
+            actual_urls = []
+
+        # --- 2. CLEAN & PARSE JSON TEXT ---
         raw_text = response.text.strip()
         if raw_text.startswith("```"):
             raw_text = raw_text.split("\n", 1)[1].rsplit("\n", 1)[0].strip()
@@ -65,7 +78,7 @@ async def verify_claim(request: BrainRequest):
 
         data = json.loads(raw_text)
 
-        # --- CUSTOM THRESHOLD LOGIC ---
+        # --- 3. APPLY CONFIDENCE THRESHOLD LOGIC ---
         # 0.7 - 1.0 -> TRUE
         # 0.4 - 0.6 -> UNCERTAIN
         # < 0.4     -> FALSE
@@ -80,12 +93,9 @@ async def verify_claim(request: BrainRequest):
         else:
             data["classification"] = "FALSE"
             # data["is_true"] = False
-        # ------------------------------
 
-        # Background Logging (Optional - uncomment if needed)
-        # with open("research_history.jsonl", "a", encoding="utf-8") as f:
-        #     log_entry = {"time": datetime.now().isoformat(), "query": request.context, "res": data}
-        #     f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+        # --- 4. OVERWRITE SOURCES WITH REAL LINKS ---
+        data["sources"] = actual_urls
 
         return data
 
@@ -95,6 +105,5 @@ async def verify_claim(request: BrainRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    # Works for Render (PORT env) and Local (8080)
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
