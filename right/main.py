@@ -29,21 +29,20 @@ class BrainRequest(BaseModel):
 @app.post("/verify")
 async def verify_claim(request: BrainRequest):
     try:
-        # We use a strict prompt to ensure JSON output without using response_mime_type
+        # Optimized prompt to get raw data for the threshold logic
         prompt = f"""
         TASK: Research and verify the following claim:
         Claim: {request.context}
         Location: {request.country}
         Date: {request.date}
 
-        OUTPUT FORMAT: You must respond ONLY with a raw JSON object. Do not include markdown tags like ```json.
+        OUTPUT FORMAT: Respond ONLY with a raw JSON object. Do not include markdown tags.
         
         SCHEMA:
         {{
-          "classification": "TRUE" | "FALSE" | "UNCERTAIN",
-          "confidence": 0.0-1.0,
-          "explanation_en": "Summary in English",
-          "explanation_native": "Summary in {request.native_language}",
+          "raw_confidence": 0.0-1.0,
+          "explanation_en": "Summary of findings in English",
+          "explanation_native": "Summary of findings in {request.native_language}",
           "sources": ["url1", "url2"]
         }}
         """
@@ -53,12 +52,11 @@ async def verify_claim(request: BrainRequest):
             contents=prompt,
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
-                # response_mime_type is REMOVED to prevent the 400 error
                 temperature=0.0
             )
         )
         
-        # Cleanup: Remove any accidental markdown backticks the AI might add
+        # Cleanup: Remove any accidental markdown backticks
         raw_text = response.text.strip()
         if raw_text.startswith("```"):
             raw_text = raw_text.split("\n", 1)[1].rsplit("\n", 1)[0].strip()
@@ -67,7 +65,24 @@ async def verify_claim(request: BrainRequest):
 
         data = json.loads(raw_text)
 
-        # # Background Logging
+        # --- CUSTOM THRESHOLD LOGIC ---
+        # 0.7 - 1.0 -> TRUE
+        # 0.4 - 0.6 -> UNCERTAIN
+        # < 0.4     -> FALSE
+        conf = data.get("raw_confidence", 0.0)
+        
+        if conf >= 0.7:
+            data["classification"] = "TRUE"
+            # data["is_true"] = True
+        elif 0.4 <= conf <= 0.6:
+            data["classification"] = "UNCERTAIN"
+            # data["is_true"] = False
+        else:
+            data["classification"] = "FALSE"
+            # data["is_true"] = False
+        # ------------------------------
+
+        # Background Logging (Optional - uncomment if needed)
         # with open("research_history.jsonl", "a", encoding="utf-8") as f:
         #     log_entry = {"time": datetime.now().isoformat(), "query": request.context, "res": data}
         #     f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
@@ -80,6 +95,6 @@ async def verify_claim(request: BrainRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    # Ensure it works on Render (which uses the PORT env var) or locally (8080)
+    # Works for Render (PORT env) and Local (8080)
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
