@@ -162,8 +162,9 @@ STRICT RULES — follow exactly:
 8. Use the placeholder __KEYWORD_FILTER__ exactly where the keyword filter should go — do NOT write any ILIKE conditions yourself:
    AND __KEYWORD_FILTER__
 9. NEVER filter or order by id — all matching rows must be returned regardless of their id value.
-10. End with: ORDER BY a.published_at DESC LIMIT 50
+10. End with: ORDER BY a.published_at DESC
 11. No dangling parentheses.
+12. Do NOT add any LIMIT clause — return all matching rows.
 
 Example output:
 SELECT a.id, a.title, a.content, a.original_url, a.language, a.published_at, mo.name AS outlet_name, c.name AS country_name
@@ -173,7 +174,7 @@ JOIN countries c ON c.id = mo.country_id
 WHERE c.name ILIKE '%Singapore%'
 AND a.published_at <= '2026-03-10'
 AND __KEYWORD_FILTER__
-ORDER BY a.published_at DESC LIMIT 50
+ORDER BY a.published_at DESC
 """
 
 sql_prompt = ChatPromptTemplate.from_messages([
@@ -408,13 +409,13 @@ def _strip_id_filters(sql: str) -> str:
     Remove any id-based WHERE conditions the LLM may have added
     (e.g. a.id < 20, id <= 50, articles.id > 10) which would silently
     exclude relevant rows with higher IDs.
-    Also ensure LIMIT is at least 50.
+    Remove any LIMIT clause — rows are capped in Python after fetching.
     """
     # Remove id comparison conditions like: a.id < 20, id <= 50, a.id BETWEEN 1 AND 30
     sql = re.sub(r"AND\s+\w*\.?id\s*(<=|>=|<|>|=|!=|BETWEEN)\s*[\d\s]+(?:AND\s+\d+)?", "", sql, flags=re.IGNORECASE)
     sql = re.sub(r"WHERE\s+\w*\.?id\s*(<=|>=|<|>|=|!=)\s*\d+", "WHERE", sql, flags=re.IGNORECASE)
-    # Ensure LIMIT is at least 50
-    sql = re.sub(r"LIMIT\s+(\d+)", lambda m: f"LIMIT {max(int(m.group(1)), 50)}", sql, flags=re.IGNORECASE)
+    # Remove any LIMIT clause -- rows are capped in Python after fetching
+    sql = re.sub(r"LIMIT\\s+\\d+", "", sql, flags=re.IGNORECASE)
     # Collapse any double spaces or dangling ANDs left behind
     sql = re.sub(r"AND\s+AND", "AND", sql, flags=re.IGNORECASE)
     sql = re.sub(r"WHERE\s+AND", "WHERE", sql, flags=re.IGNORECASE)
@@ -518,13 +519,17 @@ async def generate_and_fetch(request: SQLRequest):
         # Inject the keyword filter built in Python — avoids LLM truncation entirely
         keyword_filter = _build_keyword_filter(expanded_keywords)
         sql = sql.replace("__KEYWORD_FILTER__", keyword_filter)
-        # Strip any id-based filters and enforce minimum LIMIT 50
+        # Strip any id-based filters and remove LIMIT — Python caps after fetching
         sql = _strip_id_filters(sql)
         print("[api] final SQL:", sql)
 
         # Step 3 — fetch with auto-retry on syntax errors
         rows = _fetch_with_retry(sql)
-        print(f"[api] fetched {len(rows)} row(s)")
+        print(f"[api] fetched {len(rows)} row(s) before cap")
+
+        # Cap at 100 most relevant rows AFTER fetching all matches
+        rows = rows[:100]
+        print(f"[api] using {len(rows)} row(s) after cap")
 
         if not rows:
             return ResearchResult(
