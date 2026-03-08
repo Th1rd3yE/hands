@@ -161,8 +161,9 @@ STRICT RULES — follow exactly:
    AND a.published_at <= '{date}'
 8. Use the placeholder __KEYWORD_FILTER__ exactly where the keyword filter should go — do NOT write any ILIKE conditions yourself:
    AND __KEYWORD_FILTER__
-9. End with: ORDER BY a.published_at DESC LIMIT 20
-10. No dangling parentheses.
+9. NEVER filter or order by id — all matching rows must be returned regardless of their id value.
+10. End with: ORDER BY a.published_at DESC LIMIT 50
+11. No dangling parentheses.
 
 Example output:
 SELECT a.id, a.title, a.content, a.original_url, a.language, a.published_at, mo.name AS outlet_name, c.name AS country_name
@@ -172,7 +173,7 @@ JOIN countries c ON c.id = mo.country_id
 WHERE c.name ILIKE '%Singapore%'
 AND a.published_at <= '2026-03-10'
 AND __KEYWORD_FILTER__
-ORDER BY a.published_at DESC LIMIT 20
+ORDER BY a.published_at DESC LIMIT 50
 """
 
 sql_prompt = ChatPromptTemplate.from_messages([
@@ -393,7 +394,6 @@ def _build_keyword_filter(keywords: List[str]) -> str:
 
 def _validate_tables(sql: str) -> None:
     """Raise ValueError if the SQL references any table not in ALLOWED_TABLES."""
-    # Extract all words that follow FROM or JOIN
     referenced = set(re.findall(r"(?:FROM|JOIN)\s+(\w+)", sql, flags=re.IGNORECASE))
     unknown = referenced - ALLOWED_TABLES
     if unknown:
@@ -401,6 +401,25 @@ def _validate_tables(sql: str) -> None:
             f"SQL references unknown table(s): {unknown}. "
             f"Only allowed: {ALLOWED_TABLES}"
         )
+
+
+def _strip_id_filters(sql: str) -> str:
+    """
+    Remove any id-based WHERE conditions the LLM may have added
+    (e.g. a.id < 20, id <= 50, articles.id > 10) which would silently
+    exclude relevant rows with higher IDs.
+    Also ensure LIMIT is at least 50.
+    """
+    # Remove id comparison conditions like: a.id < 20, id <= 50, a.id BETWEEN 1 AND 30
+    sql = re.sub(r"AND\s+\w*\.?id\s*(<=|>=|<|>|=|!=|BETWEEN)\s*[\d\s]+(?:AND\s+\d+)?", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"WHERE\s+\w*\.?id\s*(<=|>=|<|>|=|!=)\s*\d+", "WHERE", sql, flags=re.IGNORECASE)
+    # Ensure LIMIT is at least 50
+    sql = re.sub(r"LIMIT\s+(\d+)", lambda m: f"LIMIT {max(int(m.group(1)), 50)}", sql, flags=re.IGNORECASE)
+    # Collapse any double spaces or dangling ANDs left behind
+    sql = re.sub(r"AND\s+AND", "AND", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"WHERE\s+AND", "WHERE", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\s{2,}", " ", sql).strip()
+    return sql
 
 
 def _fetch_with_retry(sql: str, max_retries: int = 2) -> List[dict]:
@@ -469,6 +488,9 @@ async def generate_sql(request: SQLRequest):
         payload["keywords"] = expanded
         raw = sql_chain.invoke(payload)
         sql = _clean_sql(raw)
+        keyword_filter = _build_keyword_filter(expanded)
+        sql = sql.replace("__KEYWORD_FILTER__", keyword_filter)
+        sql = _strip_id_filters(sql)
         return {"expanded_keywords": expanded, "sql": sql}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -496,7 +518,8 @@ async def generate_and_fetch(request: SQLRequest):
         # Inject the keyword filter built in Python — avoids LLM truncation entirely
         keyword_filter = _build_keyword_filter(expanded_keywords)
         sql = sql.replace("__KEYWORD_FILTER__", keyword_filter)
-        # Fallback: if LLM ignored the placeholder and wrote its own filter, we leave it as-is
+        # Strip any id-based filters and enforce minimum LIMIT 50
+        sql = _strip_id_filters(sql)
         print("[api] final SQL:", sql)
 
         # Step 3 — fetch with auto-retry on syntax errors
