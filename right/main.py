@@ -28,25 +28,33 @@ class BrainRequest(BaseModel):
 
 @app.post("/verify")
 async def verify_claim(request: BrainRequest):
+    # --- 1. LANGUAGE CHECK ---
+    # Determine if we actually need a translation
+    native_input = request.native_language.strip().lower()
+    is_english_only = not native_input or native_input == "english"
+    
+    # We still give the AI a target for the prompt to avoid errors, 
+    # but we will empty the result later.
+    target_lang = "English" if is_english_only else request.native_language
+
     try:
-        # UPDATED PROMPT: Forces AI to separate "Research Certainty" from "Truth Value"
         prompt = f"""
-        TASK: Research and verify the claim: "{request.context}"
+        TASK: Research and verify: "{request.context}"
         Location: {request.country}
         Date: {request.date}
 
         STRICT TRUTH-SCORING RULES:
-        1. If the event is CONFIRMED by news: set truth_score to 0.9 - 1.0.
-        2. If the event is NOT FOUND or debunked (No news exists for a major event): set truth_score to 0.1 - 0.2.
-        3. If there are conflicting reports or vague rumors: set truth_score to 0.5.
-        4. If the location is incorrect (e.g. Bedok in Japan): set truth_score to 0.1.
+        1. If confirmed by news/official reports: set truth_score to 0.9.
+        2. If NOT FOUND or debunked (no news for a major event): set truth_score to 0.1.
+        3. If location is incorrect: set truth_score to 0.1.
+        4. If conflicting/vague: set truth_score to 0.5.
 
-        OUTPUT FORMAT: Respond ONLY with a raw JSON object.
+        OUTPUT FORMAT: Respond ONLY with raw JSON.
         SCHEMA:
         {{
-          "truth_score": <float based on rules>,
-          "explanation_en": "Start with 'Fact:' or 'False:'",
-          "explanation_native": "Same as above in {request.native_language}",
+          "truth_score": <float>,
+          "explanation_en": "Summarize findings clearly in English.",
+          "explanation_native": "Translate the summary into {target_lang}.",
           "sources": []
         }}
         """
@@ -59,8 +67,8 @@ async def verify_claim(request: BrainRequest):
                 temperature=0.0
             )
         )
-        
-        # 1. Extract Real URLs from Metadata
+
+        # --- 2. EXTRACT URLS ---
         actual_urls = []
         try:
             metadata = response.candidates[0].grounding_metadata
@@ -69,7 +77,7 @@ async def verify_claim(request: BrainRequest):
         except:
             actual_urls = []
 
-        # 2. Cleanup & Parse JSON
+        # --- 3. CLEAN & PARSE JSON ---
         raw_text = response.text.strip()
         if raw_text.startswith("```"):
             raw_text = raw_text.split("\n", 1)[1].rsplit("\n", 1)[0].strip()
@@ -78,18 +86,18 @@ async def verify_claim(request: BrainRequest):
 
         data = json.loads(raw_text)
 
-        # 3. Logic Gate (Using truth_score)
+        # --- 4. APPLY EMPTY STRING LOGIC ---
+        if is_english_only:
+            data["explanation_native"] = ""
+
+        # --- 5. VERDICT LOGIC ---
         score = data.get("truth_score", 0.0)
-        
         if score >= 0.7:
             data["classification"] = "TRUE"
-            # data["is_true"] = True
         elif 0.4 <= score <= 0.6:
             data["classification"] = "UNVERIFIED"
-            # data["is_true"] = False
         else:
             data["classification"] = "FALSE"
-            # data["is_true"] = False
 
         data["sources"] = actual_urls
         return data
